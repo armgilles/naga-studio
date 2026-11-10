@@ -5,7 +5,7 @@ import os
 /// An action resolved for the event tap thread: no layout lookups or UI state left.
 nonisolated enum EngineAction: Sendable, Equatable {
     case swallow
-    case keys(keyCode: UInt16, modifiers: ModifierSet)
+    case keys(keyCode: UInt16, modifiers: ModifierSet, preservesPhysicalModifiers: Bool = false)
     case click(MouseClick)
     case dock(String)
     case media(Int32)
@@ -17,9 +17,24 @@ nonisolated enum ActionPhase: Sendable, Equatable {
     case down, up, repeated
 }
 
-nonisolated struct ActionPerformer: Sendable {
+/// Mutable output ownership belongs exclusively to the event-tap run loop.
+nonisolated final class ActionPerformer: @unchecked Sendable {
     static let syntheticMarker: Int64 = 0x4E41_4741
-    var postEvent: @Sendable (CGEvent) -> Void = { ActionPerformer.post($0) }
+    private let postEvent: @Sendable (CGEvent) -> Void
+    private var shortcuts: [NagaInput: Shortcut] = [:]
+    private var syntheticKeys: Set<UInt16> = []
+    private var syntheticModifiers: ModifierSet = []
+    private var physicalKeys: Set<UInt16> = []
+
+    private struct Shortcut {
+        var keyCode: UInt16
+        var modifiers: ModifierSet
+        var preservesPhysicalModifiers: Bool
+    }
+
+    init(postEvent: @escaping @Sendable (CGEvent) -> Void = { $0.post(tap: .cghidEventTap) }) {
+        self.postEvent = postEvent
+    }
 
     private static let modifierKeys: [(modifier: ModifierSet, keyCode: UInt16, flag: CGEventFlags)] = [
         (.control, 59, .maskControl),
@@ -28,12 +43,13 @@ nonisolated struct ActionPerformer: Sendable {
         (.command, 55, .maskCommand),
     ]
 
-    func perform(_ action: EngineAction, phase: ActionPhase) {
+    func perform(_ action: EngineAction, phase: ActionPhase, input: NagaInput = .mouse(-1)) {
         switch action {
         case .swallow:
             return
-        case let .keys(keyCode, modifiers):
-            postShortcut(keyCode: keyCode, modifiers: modifiers, phase: phase)
+        case let .keys(keyCode, modifiers, preservesPhysicalModifiers):
+            postShortcut(Shortcut(keyCode: keyCode, modifiers: modifiers,
+                                  preservesPhysicalModifiers: preservesPhysicalModifiers), phase: phase, input: input)
         case .click(let click):
             postClick(click, phase: phase)
         case .dock(let notification):
@@ -51,37 +67,78 @@ nonisolated struct ActionPerformer: Sendable {
         }
     }
 
-    private func postShortcut(keyCode: UInt16, modifiers: ModifierSet, phase: ActionPhase) {
-        let source = CGEventSource(stateID: .privateState)
-        let held = Self.modifierKeys.filter { modifiers.contains($0.modifier) }
-        let keyFlags = modifiers.cgFlags.union(Self.implicitFlags(for: keyCode))
+    private var physicalModifiers: ModifierSet { ModifierSet(physicalKeys: physicalKeys) }
+
+    private func flags(for shortcut: Shortcut) -> CGEventFlags {
+        let modifiers = shortcut.preservesPhysicalModifiers ? shortcut.modifiers.union(physicalModifiers) : shortcut.modifiers
+        return modifiers.cgFlags.union(Self.implicitFlags(for: shortcut.keyCode))
+    }
+
+    private func postShortcut(_ shortcut: Shortcut, phase: ActionPhase, input: NagaInput) {
         switch phase {
         case .down:
-            var flags: CGEventFlags = []
-            for key in held {
-                flags.insert(key.flag)
-                postKey(key.keyCode, isDown: true, flags: flags, source: source, isModifier: true)
+            guard shortcuts[input] == nil else { return }
+            shortcuts[input] = shortcut
+            synchronizeModifiers()
+            if !syntheticKeys.contains(shortcut.keyCode), !physicalKeys.contains(shortcut.keyCode) {
+                syntheticKeys.insert(shortcut.keyCode)
+                postKey(shortcut.keyCode, isDown: true, flags: flags(for: shortcut))
             }
-            postKey(keyCode, isDown: true, flags: keyFlags, source: source)
         case .repeated:
-            postKey(keyCode, isDown: true, flags: keyFlags, source: source, isRepeat: true)
+            guard let held = shortcuts[input], !physicalKeys.contains(held.keyCode) else { return }
+            postKey(held.keyCode, isDown: true, flags: flags(for: held), isRepeat: true)
         case .up:
-            postKey(keyCode, isDown: false, flags: keyFlags, source: source)
-            var flags = modifiers.cgFlags
-            for key in held.reversed() {
-                flags.remove(key.flag)
-                postKey(key.keyCode, isDown: false, flags: flags, source: source, isModifier: true)
+            guard let held = shortcuts.removeValue(forKey: input) else { return }
+            if !shortcuts.values.contains(where: { $0.keyCode == held.keyCode }),
+               syntheticKeys.remove(held.keyCode) != nil, !physicalKeys.contains(held.keyCode) {
+                postKey(held.keyCode, isDown: false, flags: flags(for: held))
+            }
+            synchronizeModifiers()
+        }
+    }
+
+    func updatePhysicalKeys(_ keys: Set<UInt16>) {
+        let previous = physicalModifiers
+        physicalKeys = keys
+        // A hardware release passes through unchanged, so reassert an explicit modifier still owned by an action.
+        syntheticModifiers.subtract(previous.subtracting(physicalModifiers))
+        synchronizeModifiers()
+    }
+
+    func physicalKeyChanged(_ code: UInt16, isDown: Bool) {
+        if isDown { physicalKeys.insert(code) } else { physicalKeys.remove(code) }
+        if !isDown, let held = shortcuts.values.first(where: { $0.keyCode == code }) {
+            syntheticKeys.insert(code)
+            postKey(code, isDown: true, flags: flags(for: held))
+        }
+    }
+
+    private func synchronizeModifiers() {
+        let required = shortcuts.values.reduce(ModifierSet()) { $0.union($1.modifiers) }
+        for key in Self.modifierKeys where required.contains(key.modifier)
+            && !syntheticModifiers.contains(key.modifier) && !physicalModifiers.contains(key.modifier) {
+            syntheticModifiers.insert(key.modifier)
+            postKey(key.keyCode, isDown: true, flags: syntheticModifiers.union(physicalModifiers).cgFlags, isModifier: true)
+        }
+        for key in Self.modifierKeys.reversed() where syntheticModifiers.contains(key.modifier) && !required.contains(key.modifier) {
+            syntheticModifiers.remove(key.modifier)
+            if !physicalModifiers.contains(key.modifier) {
+                postKey(key.keyCode, isDown: false, flags: syntheticModifiers.union(physicalModifiers).cgFlags, isModifier: true)
             }
         }
     }
 
-    private func postKey(_ keyCode: UInt16, isDown: Bool, flags: CGEventFlags, source: CGEventSource?,
+    private func postKey(_ keyCode: UInt16, isDown: Bool, flags: CGEventFlags,
                          isModifier: Bool = false, isRepeat: Bool = false) {
-        guard let event = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: isDown) else { return }
+        let source = CGEventSource(stateID: .privateState)
+        guard let event = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: isDown) else {
+            Self.logger.error("Could not create a remapped keyboard event.")
+            return
+        }
         if isModifier { event.type = .flagsChanged }
         event.flags = flags
         if isRepeat { event.setIntegerValueField(.keyboardEventAutorepeat, value: 1) }
-        postEvent(event)
+        emit(event)
     }
 
     /// Arrow, navigation and function keys carry these flags when typed on a real keyboard.
@@ -121,7 +178,7 @@ nonisolated struct ActionPerformer: Sendable {
         guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: location, mouseButton: button) else { return }
         event.setIntegerValueField(.mouseEventButtonNumber, value: number)
         event.setIntegerValueField(.mouseEventClickState, value: clickState)
-        postEvent(event)
+        emit(event)
     }
 
     private func type(_ text: String) {
@@ -133,7 +190,7 @@ nonisolated struct ActionPerformer: Sendable {
                 guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: isDown) else { continue }
                 chunk.withUnsafeBufferPointer { event.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: $0.baseAddress) }
                 event.flags = []
-                postEvent(event)
+                emit(event)
             }
         }
     }
@@ -141,6 +198,11 @@ nonisolated struct ActionPerformer: Sendable {
     private static func post(_ event: CGEvent) {
         event.setIntegerValueField(.eventSourceUserData, value: syntheticMarker)
         event.post(tap: .cghidEventTap)
+    }
+
+    private func emit(_ event: CGEvent) {
+        event.setIntegerValueField(.eventSourceUserData, value: Self.syntheticMarker)
+        postEvent(event)
     }
 
     @MainActor private static func postMediaKey(_ key: Int32) {

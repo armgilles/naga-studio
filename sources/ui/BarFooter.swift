@@ -60,6 +60,7 @@ struct ReadoutLive: View {
     }
 
     private var text: String {
+        guard model.engine.canIdentifyDevices else { return "Device identification unavailable" }
         guard model.isEngineRunning else { return "Waiting for permission" }
         guard let signal = model.lastSignal else { return "Press a button on your mouse" }
         switch signal.kind {

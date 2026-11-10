@@ -10,6 +10,23 @@ nonisolated struct Profile: Codable, Identifiable, Hashable, Sendable {
     var id = UUID()
     var name: String
     var actions: [NagaButton: ButtonAction] = [:]
+    var physicalModifierButtons: Set<NagaButton> = []
+
+    init(id: UUID = UUID(), name: String, actions: [NagaButton: ButtonAction] = [:],
+         physicalModifierButtons: Set<NagaButton> = []) {
+        self.id = id
+        self.name = name
+        self.actions = actions
+        self.physicalModifierButtons = physicalModifierButtons
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        actions = try container.decode([NagaButton: ButtonAction].self, forKey: .actions)
+        physicalModifierButtons = try container.decodeIfPresent(Set<NagaButton>.self, forKey: .physicalModifierButtons) ?? []
+    }
 }
 
 nonisolated struct Settings: Codable, Sendable {

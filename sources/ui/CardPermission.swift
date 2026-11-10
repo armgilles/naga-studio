@@ -4,6 +4,7 @@ struct CardPermission: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
+        let cannotIdentify = !model.engine.canIdentifyDevices
         let needsInputMonitoring = model.isTrusted && !model.isEngineRunning
         let paneName = needsInputMonitoring ? "Input Monitoring" : "Accessibility"
 
@@ -17,32 +18,36 @@ struct CardPermission: View {
                     .neonGlow(radius: 10)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("One step left").eyebrow()
-                    Text("Allow \(paneName.lowercased()) access")
+                    Text(cannotIdentify ? "Device identification unavailable" : "Allow \(paneName.lowercased()) access")
                         .font(Theme.display(25, .bold))
                         .foregroundStyle(Theme.textPrimary)
                 }
             }
-            Text("macOS asks for this before any app can read and remap input. Naga Studio only changes events that come from your Naga. Your keyboard and trackpad pass through as they are.")
+            Text(cannotIdentify
+                 ? "This macOS version does not expose the device-identification symbols Naga Studio needs. Remapping is stopped; it will not fall back to intercepting every keyboard."
+                 : "macOS asks for this before any app can read and remap input. Naga Studio only changes events that come from your Naga. Your keyboard and trackpad pass through as they are.")
                 .font(.system(size: 13))
                 .foregroundStyle(Theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-            VStack(alignment: .leading, spacing: 10) {
-                step(1, "Open Privacy & Security, then \(paneName).")
-                step(2, "Turn on Naga Studio.")
-                step(3, "Come back here. The app picks it up by itself.")
-            }
-            HStack(spacing: 10) {
-                Button("Open settings") {
-                    if needsInputMonitoring {
-                        SystemAccess.requestInputMonitoring()
-                        SystemAccess.openInputMonitoringSettings()
-                    } else {
-                        SystemAccess.openAccessibilitySettings()
-                    }
+            if !cannotIdentify {
+                VStack(alignment: .leading, spacing: 10) {
+                    step(1, "Open Privacy & Security, then \(paneName).")
+                    step(2, "Turn on Naga Studio.")
+                    step(3, "Come back here. The app picks it up by itself.")
                 }
-                .buttonStyle(ButtonRazerStyle(kind: .primary))
-                Button("Check again") { model.startEngineIfPossible() }
-                    .buttonStyle(ButtonRazerStyle(kind: .ghost))
+                HStack(spacing: 10) {
+                    Button("Open settings") {
+                        if needsInputMonitoring {
+                            SystemAccess.requestInputMonitoring()
+                            SystemAccess.openInputMonitoringSettings()
+                        } else {
+                            SystemAccess.openAccessibilitySettings()
+                        }
+                    }
+                    .buttonStyle(ButtonRazerStyle(kind: .primary))
+                    Button("Check again") { model.startEngineIfPossible() }
+                        .buttonStyle(ButtonRazerStyle(kind: .ghost))
+                }
             }
         }
         .padding(30)

@@ -18,6 +18,17 @@ struct PanelInspector: View {
                 CardAssignment(button: button)
                     .padding(.horizontal, 16)
                     .padding(.top, 16)
+                if model.action(for: button).isKeyboardAction {
+                    Toggle("Keep physical modifiers", isOn: Binding(
+                        get: { model.preservesPhysicalModifiers(for: button) },
+                        set: { model.setPreservesPhysicalModifiers($0, for: button) }
+                    ))
+                    .toggleStyle(.switch)
+                    .font(.system(size: 12))
+                    .padding(.horizontal, 20)
+                    .padding(.top, 12)
+                    .help("Combine held Control, Shift, Option and Command with the action's recorded modifiers, including while held.")
+                }
                 library(button)
             } else {
                 CardHardware(button: button)

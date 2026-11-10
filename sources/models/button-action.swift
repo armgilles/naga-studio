@@ -9,6 +9,19 @@ nonisolated struct ModifierSet: OptionSet, Codable, Hashable, Sendable {
     static let shift = ModifierSet(rawValue: 1 << 2)
     static let command = ModifierSet(rawValue: 1 << 3)
 
+    static let physicalKeyCodes: [UInt16] = [59, 62, 58, 61, 56, 60, 55, 54]
+
+    init(rawValue: Int) { self.rawValue = rawValue }
+
+    init(physicalKeys: Set<UInt16>) {
+        self = []
+        for (modifier, codes): (ModifierSet, Set<UInt16>) in [
+            (.control, [59, 62]), (.option, [58, 61]), (.shift, [56, 60]), (.command, [55, 54]),
+        ] where !physicalKeys.isDisjoint(with: codes) {
+            insert(modifier)
+        }
+    }
+
     var cgFlags: CGEventFlags {
         var flags: CGEventFlags = []
         if contains(.control) { flags.insert(.maskControl) }

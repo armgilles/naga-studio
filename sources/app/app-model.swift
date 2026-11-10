@@ -47,6 +47,7 @@ final class AppModel {
     @ObservationIgnored var openMainWindow: (() -> Void)?
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored private var batteryMonitor: BatteryMonitor?
+    @ObservationIgnored private var isSleeping = false
 
     private static let pointerButtons: Set<NagaButton> = [.leftClick, .rightClick]
     private static let didSetUpLoginItemKey = "didSetUpLoginItem"
@@ -137,12 +138,25 @@ final class AppModel {
         guard !button.isLocked else { return }
         var profile = activeProfile
         profile.actions[button] = action == .original ? nil : action
+        if !action.isKeyboardAction { profile.physicalModifierButtons.remove(button) }
+        activeProfile = profile
+    }
+
+    func preservesPhysicalModifiers(for button: NagaButton) -> Bool {
+        activeProfile.physicalModifierButtons.contains(button)
+    }
+
+    func setPreservesPhysicalModifiers(_ enabled: Bool, for button: NagaButton) {
+        guard canRemap(button), action(for: button).isKeyboardAction else { return }
+        var profile = activeProfile
+        if enabled { profile.physicalModifierButtons.insert(button) } else { profile.physicalModifierButtons.remove(button) }
         activeProfile = profile
     }
 
     func resetActiveProfile() {
         var profile = activeProfile
         profile.actions = [:]
+        profile.physicalModifierButtons = []
         activeProfile = profile
     }
 
@@ -158,7 +172,8 @@ final class AppModel {
 
     func duplicateActiveProfile() {
         let source = activeProfile
-        let copy = Profile(name: "\(source.name) copy", actions: source.actions)
+        let copy = Profile(name: "\(source.name) copy", actions: source.actions,
+                           physicalModifierButtons: source.physicalModifierButtons)
         settings.profiles.append(copy)
         settings.activeProfileID = copy.id
     }
@@ -223,7 +238,14 @@ final class AppModel {
         guard !isPreview else { return }
         let trusted = SystemAccess.isTrusted
         if trusted != isTrusted { isTrusted = trusted }
-        guard isTrusted, !isEngineRunning else { return }
+        guard isTrusted, !isSleeping else {
+            if isEngineRunning {
+                engine.stop()
+                isEngineRunning = false
+            }
+            return
+        }
+        guard engine.canIdentifyDevices, !isEngineRunning else { return }
         isEngineRunning = engine.start()
     }
 
@@ -245,10 +267,11 @@ final class AppModel {
         let layout = KeyboardLayout.reverseMap()
         var actions: [NagaButton: EngineAction] = [:]
         for (button, action) in activeProfile.actions where !button.isLocked {
-            actions[button] = action.engineAction(using: layout)
+            actions[button] = action.engineAction(using: layout, preservesPhysicalModifiers: preservesPhysicalModifiers(for: button))
         }
 
         return EngineConfig(
+            profileID: activeProfile.id,
             isRemappingEnabled: settings.isRemappingEnabled,
             invertsScroll: isSystemNatural != (settings.scrollDirection == .natural),
             isDetecting: learningButton != nil,
@@ -294,6 +317,22 @@ final class AppModel {
     }
 
     private func observeSystem() {
+        let workspace = NSWorkspace.shared.notificationCenter
+        observers.append(workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.isSleeping = true
+                self.engine.stop()
+                self.isEngineRunning = false
+            }
+        })
+        observers.append(workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.isSleeping = false
+                self.startEngineIfPossible()
+            }
+        })
         let center = NotificationCenter.default
         observers.append(center.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -322,17 +361,29 @@ final class AppModel {
 }
 
 extension ButtonAction {
-    func engineAction(using layout: [String: UInt16]) -> EngineAction? {
+    var isKeyboardAction: Bool {
+        switch self {
+        case .shortcut: true
+        case .preset(let preset):
+            if case .keys = preset.effect { true } else { false }
+        default: false
+        }
+    }
+
+    func engineAction(using layout: [String: UInt16], preservesPhysicalModifiers: Bool = false) -> EngineAction? {
         switch self {
         case .original: nil
         case .disabled: .swallow
         case .click(let click): .click(click)
-        case .shortcut(let combo): .keys(keyCode: combo.keyCode, modifiers: combo.modifiers)
+        case .shortcut(let combo):
+            .keys(keyCode: combo.keyCode, modifiers: combo.modifiers, preservesPhysicalModifiers: preservesPhysicalModifiers)
         case .text(let text): text.isEmpty ? .swallow : .text(text)
         case .app(let path): .openApp(path)
         case .preset(let preset):
             switch preset.effect {
-            case let .keys(character, keyCode, modifiers): .keys(keyCode: character.flatMap { layout[$0] } ?? keyCode, modifiers: modifiers)
+            case let .keys(character, keyCode, modifiers):
+                .keys(keyCode: character.flatMap { layout[$0] } ?? keyCode, modifiers: modifiers,
+                      preservesPhysicalModifiers: preservesPhysicalModifiers)
             case .dock(let name): .dock(name)
             case .media(let key): .media(key)
             }

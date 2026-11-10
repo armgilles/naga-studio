@@ -38,8 +38,9 @@ nonisolated final class EventHarness: Sendable {
         engine = EventEngine(
             origin: { _ in state.device.withLock { $0 } },
             isSystemProcess: { $0 == 0 },
-            performAction: { action, phase in state.calls.withLock { $0.append(ActionCall(action: action, phase: phase)) } },
-            now: { state.clock.withLock { $0 } }
+            performAction: { action, phase, _ in state.calls.withLock { $0.append(ActionCall(action: action, phase: phase)) } },
+            now: { state.clock.withLock { $0 } },
+            keyState: { _ in false }
         )
         engine.update(config)
     }

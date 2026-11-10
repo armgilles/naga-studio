@@ -72,6 +72,7 @@ nonisolated final class EventEngine: @unchecked Sendable {
     private var appliedConfig = EngineConfig()
     private var appliedRevision: UInt64 = 0
     private var physicalKeys: Set<UInt16> = []
+    private var observedKeyboardKeys: Set<UInt16> = []
     private var hasPhysicalState = false
     private var lastTiltTime: [TiltDirection: UInt64] = [:]
     private var lastScrollSignalTime: UInt64 = 0
@@ -85,7 +86,8 @@ nonisolated final class EventEngine: @unchecked Sendable {
         performer: ActionPerformer = ActionPerformer(),
         performAction: (@Sendable (EngineAction, ActionPhase, NagaInput) -> Void)? = nil,
         now: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
-        keyState: @escaping @Sendable (UInt16) -> Bool = { CGEventSource.keyState(.hidSystemState, key: $0) }
+        keyState: @escaping @Sendable (UInt16) -> Bool = { CGEventSource.keyState(.hidSystemState, key: $0) },
+        deviceIdentificationAvailable: Bool? = nil
     ) {
         let resolver = DeviceResolver()
         self.origin = origin ?? { resolver.origin(of: $0) }
@@ -94,11 +96,17 @@ nonisolated final class EventEngine: @unchecked Sendable {
         self.performAction = performAction ?? { performer.perform($0, phase: $1, input: $2) }
         self.now = now
         self.keyState = keyState
-        hasDeviceIdentification = origin != nil || resolver.isAvailable
+        hasDeviceIdentification = deviceIdentificationAvailable ?? (origin != nil || resolver.isAvailable)
         (signals, continuation) = AsyncStream.makeStream(of: InputSignal.self, bufferingPolicy: .bufferingNewest(256))
     }
 
     var canIdentifyDevices: Bool { hasDeviceIdentification }
+
+    var isRunning: Bool {
+        let state = tapState.withLock { $0 }
+        guard let tap = state.port, !state.isStopping else { return false }
+        return state.loop == nil || CGEvent.tapIsEnabled(tap: tap)
+    }
 
     func update(_ newConfig: EngineConfig) {
         config.withLock {
@@ -209,7 +217,16 @@ nonisolated final class EventEngine: @unchecked Sendable {
     }
 
     private func refreshPhysicalState() {
-        physicalKeys = Set((UInt16(0)..<128).filter(keyState))
+        if !hasPhysicalState {
+            physicalKeys = Set((UInt16(0)..<128).filter(keyState))
+            observedKeyboardKeys = []
+        } else {
+            // The aggregate HID table also includes the Naga's held raw keys. Only device-attributed
+            // keyboard events may update regular-key ownership once the tap is running.
+            for code in ModifierSet.physicalKeyCodes {
+                if keyState(code) { physicalKeys.insert(code) } else { physicalKeys.remove(code) }
+            }
+        }
         performer.updatePhysicalKeys(physicalKeys)
         hasPhysicalState = true
     }
@@ -236,6 +253,7 @@ nonisolated final class EventEngine: @unchecked Sendable {
             return passthrough
         }
         guard event.getIntegerValueField(.eventSourceUserData) != ActionPerformer.syntheticMarker else { return passthrough }
+        guard canIdentifyDevices else { return passthrough }
 
         synchronizeConfiguration()
         if type == .flagsChanged {
@@ -250,10 +268,16 @@ nonisolated final class EventEngine: @unchecked Sendable {
         let config = appliedConfig
         let eventOrigin = origin(event)
         guard isFromNaga(type, event, config, origin: eventOrigin) else {
-            if (type == .keyDown || type == .keyUp),
+            if case .otherDevice = eventOrigin, (type == .keyDown || type == .keyUp),
                isSystemProcess(event.getIntegerValueField(.eventSourceUnixProcessID)) {
                 let code = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
-                if type == .keyDown { physicalKeys.insert(code) } else { physicalKeys.remove(code) }
+                if type == .keyDown {
+                    physicalKeys.insert(code)
+                    observedKeyboardKeys.insert(code)
+                } else {
+                    physicalKeys.remove(code)
+                    observedKeyboardKeys.remove(code)
+                }
                 performer.physicalKeyChanged(code, isDown: type == .keyDown)
             }
             return passthrough
@@ -263,6 +287,7 @@ nonisolated final class EventEngine: @unchecked Sendable {
         case .scrollWheel: handleScroll(event, config)
         case .rightMouseDragged, .otherMouseDragged:
             activeActions[.mouse(Int(event.getIntegerValueField(.mouseEventButtonNumber)))] != nil
+                || suppressedInputs.contains(.mouse(Int(event.getIntegerValueField(.mouseEventButtonNumber))))
         default: handleMouseButton(type, event, config)
         }
         return shouldSwallow ? nil : passthrough
@@ -285,9 +310,14 @@ nonisolated final class EventEngine: @unchecked Sendable {
     }
 
     private func handleKey(_ type: CGEventType, _ event: CGEvent, _ config: EngineConfig) -> Bool {
-        let input = NagaInput.key(UInt16(event.getIntegerValueField(.keyboardEventKeycode)))
+        let code = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        let input = NagaInput.key(code)
         let button = config.buttonsByInput[input]
 
+        // A button already held at startup can appear in the initial aggregate HID snapshot.
+        if type == .keyUp, !observedKeyboardKeys.contains(code), !keyState(code), physicalKeys.remove(code) != nil {
+            performer.updatePhysicalKeys(physicalKeys)
+        }
         if suppressedInputs.contains(input) {
             if type == .keyUp {
                 suppressedInputs.remove(input)

@@ -14,12 +14,14 @@ nonisolated struct KeyEmission: Equatable, Sendable {
     var code: UInt16
     var flags: CGEventFlags
     var repeated: Bool
+    var synthetic: Bool
 
     init(_ event: CGEvent) {
         type = event.type
         code = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         flags = event.flags
         repeated = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+        synthetic = event.getIntegerValueField(.eventSourceUserData) == ActionPerformer.syntheticMarker
     }
 }
 

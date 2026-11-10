@@ -106,8 +106,9 @@ nonisolated final class ActionPerformer: @unchecked Sendable {
     }
 
     func physicalKeyChanged(_ code: UInt16, isDown: Bool) {
+        let wasDown = physicalKeys.contains(code)
         if isDown { physicalKeys.insert(code) } else { physicalKeys.remove(code) }
-        if !isDown, let held = shortcuts.values.first(where: { $0.keyCode == code }) {
+        if !isDown, wasDown, let held = shortcuts.values.first(where: { $0.keyCode == code }) {
             syntheticKeys.insert(code)
             postKey(code, isDown: true, flags: flags(for: held))
         }

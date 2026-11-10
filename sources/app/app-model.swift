@@ -238,6 +238,10 @@ final class AppModel {
         guard !isPreview else { return }
         let trusted = SystemAccess.isTrusted
         if trusted != isTrusted { isTrusted = trusted }
+        if isEngineRunning, !engine.isRunning {
+            engine.stop()
+            isEngineRunning = false
+        }
         guard isTrusted, !isSleeping else {
             if isEngineRunning {
                 engine.stop()

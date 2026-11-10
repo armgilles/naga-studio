@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 nonisolated enum ScrollDirection: String, Codable, CaseIterable, Sendable {
     case standard, natural
@@ -50,14 +51,23 @@ nonisolated struct Settings: Codable, Sendable {
         if profiles.isEmpty { profiles = [Profile(name: "Default")] }
     }
 
-    static func load() -> Settings {
-        guard let data = UserDefaults.standard.data(forKey: storageKey),
-              let settings = try? JSONDecoder().decode(Settings.self, from: data) else { return Settings() }
-        return settings
+    static func load(from defaults: UserDefaults = .standard) -> Settings {
+        guard let data = defaults.data(forKey: storageKey) else { return Settings() }
+        do {
+            return try JSONDecoder().decode(Settings.self, from: data)
+        } catch {
+            logger.error("Could not decode saved settings: \(error.localizedDescription, privacy: .public)")
+            return Settings()
+        }
     }
 
-    func save() {
-        guard let data = try? JSONEncoder().encode(self) else { return }
-        UserDefaults.standard.set(data, forKey: Self.storageKey)
+    func save(to defaults: UserDefaults = .standard) {
+        do {
+            defaults.set(try JSONEncoder().encode(self), forKey: Self.storageKey)
+        } catch {
+            Self.logger.error("Could not encode settings: \(error.localizedDescription, privacy: .public)")
+        }
     }
+
+    private static let logger = Logger(subsystem: "com.marclou.naga-studio", category: "settings")
 }

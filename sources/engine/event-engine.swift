@@ -38,7 +38,10 @@ nonisolated final class EventEngine: @unchecked Sendable {
     private let continuation: AsyncStream<InputSignal>.Continuation
     private let config = Mutex(EngineConfig())
     private let resolver = DeviceResolver()
-    private let performer = ActionPerformer()
+    private let origin: @Sendable (CGEvent) -> EventOrigin
+    private let isSystemProcess: @Sendable (Int64) -> Bool
+    private let performAction: @Sendable (EngineAction, ActionPhase) -> Void
+    private let now: @Sendable () -> UInt64
 
     // Assigned on the main thread before the tap thread starts; read-only afterwards.
     private var tap: CFMachPort?
@@ -51,7 +54,17 @@ nonisolated final class EventEngine: @unchecked Sendable {
     private static let tiltPressGap: UInt64 = 300_000_000
     private static let scrollSignalGap: UInt64 = 40_000_000
 
-    init() {
+    init(
+        origin: (@Sendable (CGEvent) -> EventOrigin)? = nil,
+        isSystemProcess: (@Sendable (Int64) -> Bool)? = nil,
+        performAction: @escaping @Sendable (EngineAction, ActionPhase) -> Void = { ActionPerformer().perform($0, phase: $1) },
+        now: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
+    ) {
+        let resolver = DeviceResolver()
+        self.origin = origin ?? { resolver.origin(of: $0) }
+        self.isSystemProcess = isSystemProcess ?? { resolver.isSystemProcess($0) }
+        self.performAction = performAction
+        self.now = now
         (signals, continuation) = AsyncStream.makeStream(of: InputSignal.self, bufferingPolicy: .bufferingNewest(256))
     }
 
@@ -98,7 +111,7 @@ nonisolated final class EventEngine: @unchecked Sendable {
         CFRunLoopRun()
     }
 
-    fileprivate func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
+    func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
         let passthrough = Unmanaged.passUnretained(event)
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
@@ -125,7 +138,7 @@ nonisolated final class EventEngine: @unchecked Sendable {
     }
 
     private func isFromNaga(_ type: CGEventType, _ event: CGEvent, _ config: EngineConfig) -> Bool {
-        switch resolver.origin(of: event) {
+        switch origin(event) {
         case .naga:
             true
         case .otherDevice:
@@ -135,7 +148,7 @@ nonisolated final class EventEngine: @unchecked Sendable {
             // hardware middle click while the Naga is connected is the Naga's wheel.
             config.isNagaConnected
                 && [CGEventType.otherMouseDown, .otherMouseUp, .otherMouseDragged].contains(type)
-                && resolver.isSystemProcess(pid)
+                && isSystemProcess(pid)
         }
     }
 
@@ -146,12 +159,12 @@ nonisolated final class EventEngine: @unchecked Sendable {
         guard type == .keyDown else {
             emit(input, button, .up)
             guard let action = activeActions.removeValue(forKey: input) else { return false }
-            performer.perform(action, phase: .up)
+            performAction(action, .up)
             return true
         }
 
         if let action = activeActions[input] {
-            performer.perform(action, phase: .repeated)
+            performAction(action, .repeated)
             return true
         }
         if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 { return false }
@@ -161,7 +174,7 @@ nonisolated final class EventEngine: @unchecked Sendable {
         let action = config.isDetecting || config.isAppFrontmost ? mapped ?? .swallow : mapped
         guard let action else { return false }
         activeActions[input] = action
-        performer.perform(action, phase: .down)
+        performAction(action, .down)
         return true
     }
 
@@ -174,7 +187,7 @@ nonisolated final class EventEngine: @unchecked Sendable {
         guard isDown else {
             emit(input, button, .up)
             guard number != 0, let action = activeActions.removeValue(forKey: input) else { return false }
-            performer.perform(action, phase: .up)
+            performAction(action, .up)
             return true
         }
 
@@ -184,7 +197,7 @@ nonisolated final class EventEngine: @unchecked Sendable {
         let action: EngineAction? = !isLeftClick && config.isDetecting ? .swallow : mapped
         guard let action else { return false }
         activeActions[input] = action
-        performer.perform(action, phase: .down)
+        performAction(action, .down)
         return true
     }
 
@@ -193,7 +206,7 @@ nonisolated final class EventEngine: @unchecked Sendable {
         let horizontal = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2)
         // Natural scrolling flips deltas before the tap sees them; undo that to get the physical direction.
         let physicalSign: Double = config.isSystemNatural ? -1 : 1
-        let now = DispatchTime.now().uptimeNanoseconds
+        let now = now()
 
         if vertical == 0, horizontal != 0 {
             let direction: TiltDirection = horizontal * physicalSign > 0 ? .left : .right
@@ -206,8 +219,8 @@ nonisolated final class EventEngine: @unchecked Sendable {
             if config.isDetecting { return true }
             if let mapped {
                 if isNewPress {
-                    performer.perform(mapped, phase: .down)
-                    performer.perform(mapped, phase: .up)
+                    performAction(mapped, .down)
+                    performAction(mapped, .up)
                 }
                 return true
             }

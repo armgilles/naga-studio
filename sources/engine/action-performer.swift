@@ -13,12 +13,13 @@ nonisolated enum EngineAction: Sendable, Equatable {
     case openApp(String)
 }
 
-nonisolated enum ActionPhase: Sendable {
+nonisolated enum ActionPhase: Sendable, Equatable {
     case down, up, repeated
 }
 
 nonisolated struct ActionPerformer: Sendable {
     static let syntheticMarker: Int64 = 0x4E41_4741
+    var postEvent: @Sendable (CGEvent) -> Void = { ActionPerformer.post($0) }
 
     private static let modifierKeys: [(modifier: ModifierSet, keyCode: UInt16, flag: CGEventFlags)] = [
         (.control, 59, .maskControl),
@@ -80,7 +81,7 @@ nonisolated struct ActionPerformer: Sendable {
         if isModifier { event.type = .flagsChanged }
         event.flags = flags
         if isRepeat { event.setIntegerValueField(.keyboardEventAutorepeat, value: 1) }
-        Self.post(event)
+        postEvent(event)
     }
 
     /// Arrow, navigation and function keys carry these flags when typed on a real keyboard.
@@ -120,7 +121,7 @@ nonisolated struct ActionPerformer: Sendable {
         guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: location, mouseButton: button) else { return }
         event.setIntegerValueField(.mouseEventButtonNumber, value: number)
         event.setIntegerValueField(.mouseEventClickState, value: clickState)
-        Self.post(event)
+        postEvent(event)
     }
 
     private func type(_ text: String) {
@@ -132,7 +133,7 @@ nonisolated struct ActionPerformer: Sendable {
                 guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: isDown) else { continue }
                 chunk.withUnsafeBufferPointer { event.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: $0.baseAddress) }
                 event.flags = []
-                Self.post(event)
+                postEvent(event)
             }
         }
     }

@@ -20,5 +20,6 @@ let package = Package(
                 .linkedFramework("ServiceManagement"),
             ]
         ),
+        .testTarget(name: "NagaStudioTests", dependencies: ["NagaStudio"], path: "tests"),
     ]
 )
